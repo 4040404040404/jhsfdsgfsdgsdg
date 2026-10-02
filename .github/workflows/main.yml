@@ -1,22 +1,26 @@
-name: Linkvertise Automation Continuous
+name: Linkvertise Automation Loop
 
 on:
-  # Trigger when previous workflow completes - creates infinite loop
-  workflow_run:
-    workflows: ["Linkvertise Automation Continuous"]
-    types: [completed]
+  # Run on schedule every 30 minutes
+  schedule:
+    - cron: '*/30 * * * *'
   
-  # Manual start
+  # Allow manual trigger
   workflow_dispatch:
+  
+  # Trigger when workflow completes (creates continuous loop)
+  workflow_run:
+    workflows: ["Linkvertise Automation Loop"]
+    types: [completed]
 
 jobs:
   automate:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     
-    concurrency:
-      group: automation
-      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
 
     steps:
       - name: 📥 Checkout repository
@@ -29,45 +33,40 @@ jobs:
           cache: 'npm'
 
       - name: 📦 Install dependencies
-        run: npm install --production
+        run: npm install
 
-      - name: 🎬 Run automation (Attempt 1)
-        id: run1
+      - name: 🎬 Run automation script
         run: npm start
         timeout-minutes: 5
         continue-on-error: true
 
-      - name: ⏳ Wait before next cycle
-        run: sleep 120  # Wait 2 minutes before next check
-
-      - name: 🎬 Run automation (Attempt 2)
-        if: steps.run1.outcome == 'failure'
-        id: run2
-        run: npm start
-        timeout-minutes: 5
-        continue-on-error: true
-
-      - name: 📊 Log results
-        if: always()
+      - name: 📝 Log completion
         run: |
-          echo "Run 1 Status: ${{ steps.run1.outcome }}"
-          echo "Run 2 Status: ${{ steps.run2.outcome }}"
-          echo "Completed at: $(date)"
+          echo "Automation job completed at $(date)"
+          echo "Next run will be triggered automatically in 30 minutes"
 
-      - name: 🔄 Trigger next cycle
+      - name: 🔄 Trigger next run (Self-trigger for continuous loop)
         if: always()
         uses: actions/github-script@v7
         with:
           script: |
-            try {
-              const response = await github.rest.actions.createWorkflowDispatch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: 'automation-continuous.yml',
-                ref: context.ref
-              });
-              console.log('Next cycle triggered:', response.status);
-            } catch (error) {
-              console.log('Failed to trigger next cycle:', error.message);
-            }
+            github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'automation.yml',
+              ref: context.ref
+            });
         continue-on-error: true
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: automate
+    if: always()
+    
+    steps:
+      - name: ✅ Workflow summary
+        run: |
+          echo "==================================="
+          echo "Automation job finished"
+          echo "Status: ${{ needs.automate.result }}"
+          echo "==================================="
