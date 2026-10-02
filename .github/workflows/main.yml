@@ -1,72 +1,141 @@
-name: Linkvertise Automation Loop
+name: Playwright Continuous Automation (Chrome Remote Desktop)
 
 on:
-  # Run on schedule every 30 minutes
+  workflow_dispatch:
+    inputs:
+      crd_code:
+        description: 'Chrome Remote Desktop --code (optional override)'
+        required: false
+        default: '4/0AXlqoi6-M5OD2jOGJM3TFqcCtyviMBrLKvy719YnFeXhJvIUuP7n4Tb21GZZtcy7_UbUnw'
+      crd_pin:
+        description: '6-digit PIN for Chrome Remote Desktop'
+        required: false
+        default: '123456'
+      target_url:
+        description: 'Starting website URL'
+        required: false
+        default: 'https://zealous-river-220556.puter.site'
+
+  push:
+    branches:
+      - main
+      - master
+
   schedule:
     - cron: '*/30 * * * *'
-  
-  # Allow manual trigger
-  workflow_dispatch:
-  
-  # Trigger when workflow completes (creates continuous loop)
-  workflow_run:
-    workflows: ["Linkvertise Automation Loop"]
-    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: playwright-continuous-runner
+  cancel-in-progress: false
 
 jobs:
-  automate:
+  run-automation:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    
-    permissions:
-      contents: read
-      actions: write
+    timeout-minutes: 60
 
     steps:
-      - name: 📥 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🔧 Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
+          node-version: '20'
 
-      - name: 📦 Install dependencies
+      - name: Install dependencies
         run: npm install
 
-      - name: 🎬 Run automation script
-        run: npm start
-        timeout-minutes: 5
-        continue-on-error: true
+      - name: Install Playwright Chromium & system dependencies
+        run: npx playwright install --with-deps chromium
 
-      - name: 📝 Log completion
-        run: |
-          echo "Automation job completed at $(date)"
-          echo "Next run will be triggered automatically in 30 minutes"
-
-      - name: 🔄 Trigger next run (Self-trigger for continuous loop)
-        if: always()
-        uses: actions/github-script@v7
+      - name: Cache Chrome Remote Desktop Host Config Across Chained Jobs
+        uses: actions/cache@v4
         with:
-          script: |
-            github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'automation.yml',
-              ref: context.ref
-            });
-        continue-on-error: true
+          path: ~/.config/chrome-remote-desktop
+          key: crd-host-config-${{ github.repository }}
+          restore-keys: |
+            crd-host-config-
 
-  notify:
-    runs-on: ubuntu-latest
-    needs: automate
-    if: always()
-    
-    steps:
-      - name: ✅ Workflow summary
+      - name: Install & Start Chrome Remote Desktop
+        env:
+          CRD_CODE: ${{ github.event.inputs.crd_code || '4/0AXlqoi6-M5OD2jOGJM3TFqcCtyviMBrLKvy719YnFeXhJvIUuP7n4Tb21GZZtcy7_UbUnw' }}
+          CRD_PIN: ${{ github.event.inputs.crd_pin || '123456' }}
         run: |
-          echo "==================================="
-          echo "Automation job finished"
-          echo "Status: ${{ needs.automate.result }}"
-          echo "==================================="
+          sudo apt-get update -y
+          curl -L https://dl.google.com/linux/direct/chrome-remote-desktop_current_amd64.deb \
+            -o /tmp/chrome-remote-desktop_current_amd64.deb
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            /tmp/chrome-remote-desktop_current_amd64.deb \
+            xfce4 xfce4-goodies xfce4-terminal dbus-x11 xvfb
+
+          sudo usermod -a -G chrome-remote-desktop "$USER"
+
+          # Configure Chrome Remote Desktop to launch XFCE4 desktop session (1366x768)
+          sudo bash -c 'echo "exec /etc/X11/Xsession /usr/bin/xfce4-session" > /etc/chrome-remote-desktop-session'
+          export CHROME_REMOTE_DESKTOP_DEFAULT_DESKTOP_SIZES="1366x768"
+          echo "export CHROME_REMOTE_DESKTOP_DEFAULT_DESKTOP_SIZES=1366x768" >> ~/.profile
+
+          mkdir -p ~/.config/chrome-remote-desktop
+
+          # If not yet registered in cache, run your exact start-host command with the 6-digit PIN
+          if ! ls ~/.config/chrome-remote-desktop/host#*.json 1>/dev/null 2>&1; then
+            echo "Registering Chrome Remote Desktop host..."
+            DISPLAY= /opt/google/chrome-remote-desktop/start-host \
+              --code="$CRD_CODE" \
+              --redirect-url="https://remotedesktop.google.com/_/oauthredirect" \
+              --name=$(hostname) \
+              --pin="$CRD_PIN" || true
+          fi
+
+          # Ensure the Chrome Remote Desktop service is running
+          sudo service chrome-remote-desktop restart || /opt/google/chrome-remote-desktop/chrome-remote-desktop --start || true
+          sleep 5
+
+          echo "=================================================================="
+          echo "🖥️  CHROME REMOTE DESKTOP IS LIVE!"
+          echo "👉  Open: https://remotedesktop.google.com/access"
+          echo "👉  Host: $(hostname)"
+          echo "👉  PIN : ${CRD_PIN}"
+          echo "=================================================================="
+          {
+            echo "### 🖥️ Chrome Remote Desktop Live Preview"
+            echo "- **Access Link:** [https://remotedesktop.google.com/access](https://remotedesktop.google.com/access)"
+            echo "- **Host Name:** \`$(hostname)\`"
+            echo "- **PIN:** \`${CRD_PIN}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run Playwright Script Inside Chrome Remote Desktop Display
+        env:
+          TARGET_URL: ${{ github.event.inputs.target_url || 'https://zealous-river-220556.puter.site' }}
+        run: |
+          # Detect the X display created by Chrome Remote Desktop (defaults to :20)
+          CRD_DISPLAY=$(ls /tmp/.X11-unix/ 2>/dev/null | sed 's/X/:/g' | head -n 1)
+          if [ -z "$CRD_DISPLAY" ]; then
+            Xvfb :20 -screen 0 1366x768x24 -ac +extension GLX +render -noreset &
+            sleep 2
+            CRD_DISPLAY=":20"
+          fi
+
+          echo "Launching Playwright on Chrome Remote Desktop display ${CRD_DISPLAY}..."
+          export DISPLAY="$CRD_DISPLAY"
+          xhost +local: 2>/dev/null || true
+
+          node run-finale.js "$TARGET_URL"
+
+      - name: Trigger Next Identical Job Automatically on Completion
+        if: always() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_URL: ${{ github.event.inputs.target_url || 'https://zealous-river-220556.puter.site' }}
+          CRD_PIN: ${{ github.event.inputs.crd_pin || '123456' }}
+        run: |
+          echo "Current job finished. Triggering the next identical workflow run..."
+          gh workflow run playwright.yml \
+            --ref "${{ github.ref_name }}" \
+            -f target_url="$TARGET_URL" \
+            -f crd_pin="$CRD_PIN"
